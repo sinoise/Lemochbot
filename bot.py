@@ -1,7 +1,7 @@
 import os
-import logging
 import sqlite3
 import secrets
+import logging
 
 from telegram import Update
 from telegram.ext import (
@@ -16,14 +16,15 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
+ADMIN_ID = 379290695
+
 DB_FILE = "movies.db"
 
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
 
-    cursor.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS movies (
             code TEXT PRIMARY KEY,
             file_id TEXT NOT NULL
@@ -35,69 +36,89 @@ def init_db():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
 
-    if context.args:
-        code = context.args[0]
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT file_id FROM movies WHERE code = ?",
-            (code,)
-        )
-
-        result = cursor.fetchone()
-        conn.close()
-
-        if not result:
-            await update.message.reply_text(
-                "❌ Movie not found."
-            )
-            return
-
-        file_id = result[0]
-
-        sent_message = await context.bot.send_video(
-            chat_id=update.effective_chat.id,
-            video=file_id,
-            caption="🎬 Enjoy the movie."
-        )
-
-        context.job_queue.run_once(
-            delete_movie_message,
-            600,
-            data={
-                "chat_id": update.effective_chat.id,
-                "message_id": sent_message.message_id,
-            },
-        )
-
+    if not context.args:
         await update.message.reply_text(
-            "⏳ This movie will disappear in 10 minutes."
+            "🎬 Send a movie link to watch."
         )
-
         return
 
+    code = context.args[0]
+
+    conn = sqlite3.connect(DB_FILE)
+
+    result = conn.execute(
+        "SELECT file_id FROM movies WHERE code = ?",
+        (code,)
+    ).fetchone()
+
+    conn.close()
+
+    if not result:
+        await update.message.reply_text(
+            "❌ Movie not found."
+        )
+        return
+
+    file_id = result[0]
+
+    movie_message = await context.bot.send_video(
+        chat_id=update.effective_chat.id,
+        video=file_id,
+        caption="🎬 Enjoy."
+    )
+
+    context.job_queue.run_once(
+        delete_movie,
+        600,
+        data={
+            "chat_id": update.effective_chat.id,
+            "message_id": movie_message.message_id,
+        }
+    )
+
     await update.message.reply_text(
-        "🎬 Send a movie link to get started."
+        "⏳ This message disappears in 10 minutes."
     )
 
 
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def receive_video(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "Sorry, only the bot owner can add movies."
+        )
+        return
+
+    video = update.message.video
+
+    code = secrets.token_urlsafe(6)
+
+    conn = sqlite3.connect(DB_FILE)
+
+    conn.execute(
+        "INSERT INTO movies (code, file_id) VALUES (?, ?)",
+        (code, video.file_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+    bot_username = (await context.bot.get_me()).username
+
+    link = f"https://t.me/{bot_username}?start={code}"
+
     await update.message.reply_text(
-        f"Your Telegram ID:\n{update.effective_user.id}"
+        f"✅ Movie saved.\n\n"
+        f"🔗 Link:\n{link}"
     )
 
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⏳ Send me your Telegram ID first with /id."
-    )
+async def delete_movie(context: ContextTypes.DEFAULT_TYPE):
 
-
-async def delete_movie_message(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
 
     try:
@@ -111,15 +132,20 @@ async def delete_movie_message(context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+
     init_db()
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("id", get_id))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
     app.add_handler(
-        MessageHandler(filters.VIDEO, receive_video)
+        MessageHandler(
+            filters.VIDEO,
+            receive_video
+        )
     )
 
     print("LemochBot is running...")
